@@ -60,10 +60,6 @@ APawn* UGAPerceptionComponent::GetOwnerPawn() const
 	return NULL;
 }
 
-
-
-// Returns the Target this AI is attending to right now.
-
 UGATargetComponent* UGAPerceptionComponent::GetCurrentTarget() const
 {
 	UGAPerceptionSystem* PerceptionSystem = UGAPerceptionSystem::GetPerceptionSystem(this);
@@ -163,33 +159,15 @@ void UGAPerceptionComponent::UpdateTargetData(UGATargetComponent* TargetComponen
 
 	if (TargetData)
 	{
-		// TODO PART 3
-		// 
-		// - Update TargetData->bClearLOS
-		//		Use this.VisionParameters to determine whether the target is within the vision cone or not 
-		//		(and ideally do so before you case a ray towards it)
-		// - Update TargetData->Awareness
-		//		On ticks when the AI has a clear LOS, the Awareness should grow
-		//		On ticks when the AI does not have a clear LOS, the Awareness should decay
-		//
-		// Awareness should be clamped to the range [0, 1]
-		// You can add parameters to the UGAPerceptionComponent to control the speed at which awareness rises and falls
-
-		// YOUR CODE HERE
-		
 		
 		TargetData->bClearLos = IsPerceived(TargetComponent->GetOwner()->GetActorLocation());
 
 		if (TargetData->bClearLos)
 		{
-			// Increase awareness if LOS is clear
-			//GEngine->AddOnScreenDebugMessage(-1, 15.0f, FColor::Yellow, TEXT("Perceived"));
 			TargetData->Awareness = FMath::Min(1.0f, TargetData->Awareness + (GetWorld()->GetDeltaSeconds() * 2)); 
 		}
 		else
 		{
-			// Decrease awareness if LOS is not clear
-			//GEngine->AddOnScreenDebugMessage(-1, 15.0f, FColor::Yellow, TEXT("Not Perceived"));
 			TargetData->Awareness = FMath::Max(0.0f, TargetData->Awareness - (GetWorld()->GetDeltaSeconds() * 2)); 
 		}
 	}

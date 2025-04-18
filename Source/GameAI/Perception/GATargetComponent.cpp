@@ -109,10 +109,8 @@ void UGATargetComponent::TickComponent(float DeltaTime, enum ELevelTick TickType
 		AActor* Owner = GetOwner();
 		LastKnownState.State = GATS_Immediate;
 
-		// REFRESH MY STATE
 		LastKnownState.Set(Owner->GetActorLocation(), Owner->GetVelocity());
 
-		// Tell the omap to clear out and put all the probability in the observed location
 		OccupancyMapSetPosition(LastKnownState.Position);
 	}
 	else if (IsKnown())
@@ -126,8 +124,6 @@ void UGATargetComponent::TickComponent(float DeltaTime, enum ELevelTick TickType
 		UE_LOG(LogTemp, Warning, TEXT("IsHidden!"));
 		OccupancyMapUpdate();
 	}
-
-	// As long as I'm known, whether I'm immediate or not, diffuse the probability in the omap
 
 	if (IsKnown())
 	{
@@ -146,10 +142,6 @@ void UGATargetComponent::TickComponent(float DeltaTime, enum ELevelTick TickType
 
 void UGATargetComponent::OccupancyMapSetPosition(const FVector& Position)
 {
-	// TODO PART 4
-
-	// We've been observed to be in a given position
-	// Clear out all probability in the omap, and set the appropriate cell to P = 1.0
 
 	const AGAGridActor* Grid = GetGridActor();
 	bDebugOccupancyMap = true;
@@ -175,14 +167,13 @@ bool UGATargetComponent::IsLocationBlocked(const FVector& Location)
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
-	// Simple sphere trace to check if location is blocked
 	return GetWorld()->SweepTestByChannel(
-		Location,              // Start
-		Location,              // End (same as start for simple overlap)
-		FQuat::Identity,       // Rotation
-		ECC_WorldStatic,       // Collision channel
-		FCollisionShape::MakeSphere(50.0f), // Shape
-		QueryParams            // Parameters
+		Location,
+		Location,
+		FQuat::Identity,
+		ECC_WorldStatic,
+		FCollisionShape::MakeSphere(50.0f),
+		QueryParams
 	);
 }
 
@@ -192,13 +183,6 @@ void UGATargetComponent::OccupancyMapUpdate()
 	if (Grid)
 	{
 		FGAGridMap VisibilityMap(Grid, 0.0f);
-
-		// TODO PART 4
-
-		// STEP 1: Build a visibility map, based on the perception components of the AIs in the world
-		// The visibility map is a simple map where each cell is either 0 (not currently visible to ANY perceiver) or 1 (currently visible to one or more perceivers).
-		// 
-
 		float minVal = FLT_MAX;
 		float maxVal = -FLT_MAX;
 
@@ -215,11 +199,7 @@ void UGATargetComponent::OccupancyMapUpdate()
 					FCellRef cellReference = FCellRef(x, y);
 
 					for (UGAPerceptionComponent* PerceptionComponent : PerceptionComponents) {
-						// Find visible cells for this perceiver.
-						// Reminder: Use the PerceptionComponent.VisionParameters when determining whether a cell is visible or not (in addition to a line trace).
-						// Suggestion: you might find it useful to add a UGAPerceptionComponent::TestVisibility method to the perception component.
 						if (PerceptionComponent->IsPerceived(Grid->GetCellPosition(cellReference) + FVector::UpVector * 50.0f)) {
-							//GEngine->AddOnScreenDebugMessage(-1, 15.0f, FColor::Yellow, TEXT("Perceived"));
 							visibleCells.Add(cellReference);
 							allCells.Add(cellReference);
 						}
@@ -237,15 +217,11 @@ void UGATargetComponent::OccupancyMapUpdate()
 			}
 		}
 
-
-
-		// STEP 2: Clear out the probability in the visible cells
 		for (FCellRef ref : visibleCells) {
 			OccupancyMap.SetValue(ref, 0.0f);
 			minVal = 0.0f;
 		}
 
-		// STEP 3: Renormalize the OMap, so that it's still a valid probability distribution
 		FCellRef HighestLikelihoodCell;
 		float MaxLikelihood = -1.0f;
 		FVector CellPosition;
@@ -267,7 +243,6 @@ void UGATargetComponent::OccupancyMapUpdate()
 					MaxLikelihood = value;
 
 					if (Grid->IsValidCell(HighestLikelihoodCell)) {
-						// Get the position of the highest likelihood cell
 						CellPosition = Grid->GetCellPosition(HighestLikelihoodCell) + FVector(0.0f, 0.0f, 100.0f);
 
 						// Clamp the X and Y coordinates within the valid range
@@ -289,25 +264,13 @@ void UGATargetComponent::OccupancyMapUpdate()
 							MaxLikelihood = tempLikelihood;
 
 							FVector debugCellPos = Grid->GetCellPosition(HighestLikelihoodCell);
-							//UE_LOG(LogTemp, Warning, TEXT("CellPosition: X=%f, Y=%f, Z=%f"), CellPosition.X, CellPosition.Y, CellPosition.Z);
-
-							//UE_LOG(LogTemp, Warning, TEXT("HighestLikelihoodCell: X=%d, Y=%d"), HighestLikelihoodCell.X, HighestLikelihoodCell.Y);
-
-							//UE_LOG(LogTemp, Warning, TEXT("Debug Cell Pos: X=%d, Y=%d, Z=%d"), debugCellPos.X, debugCellPos.Y, debugCellPos.Z);
-
 						}
 					}
 				}
 			}
 		}
-		// STEP 4: Extract the highest-likelihood cell on the omap and refresh the LastKnownState.
-
-		// I don't know why this doesn't actually work at all
-		//LastKnownState.Set(Grid->GetCellPosition(HighestLikelihoodCell), LastKnownState.Velocity);
 
 		LastKnownState.Set(CellPosition, LastKnownState.Velocity);
-		//UE_LOG(LogTemp, Warning, TEXT("LastKnownPos: X=%f, Y=%f, Z=%f"), LastKnownState.Position.X, LastKnownState.Position.Y, LastKnownState.Position.Z);
-		//GEngine->AddOnScreenDebugMessage(-1, 15.0f, FColor::Green, FString::SanitizeFloat(maxVal));
 		DrawDebugSphere(GetWorld(), Grid->GetCellPosition(HighestLikelihoodCell), 50, 1, FColor::Green, true, 10, 1, .5f);
 	}
 
@@ -332,7 +295,7 @@ void UGATargetComponent::OccupancyMapDiffuse()
 	diffusionMap = OccupancyMap;
 
 	// Diffusion parameters
-	const float DiffusionFactor = 0.4f; // Adjust based on desired diffusion rate
+	const float DiffusionFactor = 0.4f; 
 	const float InverseDiffusionFactor = 1.0f - DiffusionFactor;
 
 	// Diffuse the probability from each cell to its neighboring cells
