@@ -16,16 +16,12 @@ AGACharacter::AGACharacter()
 		
 	// Configure character rotation
 	// Should the character rotate towards the direction of movement?
-	GetCharacterMovement()->bOrientRotationToMovement = true; // Character moves in the direction of input...	
-	// ... or should it take rotation from its controller?
+	GetCharacterMovement()->bOrientRotationToMovement = true; 
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationYaw = false;
 	bUseControllerRotationRoll = false;
 
-	GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f); // ...at this rotation rate
-
-	// Note: For faster iteration times these variables, and many more, can be tweaked in the Character Blueprint
-	// instead of recompiling to adjust them
+	GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f);
 	GetCharacterMovement()->JumpZVelocity = 700.f;
 	GetCharacterMovement()->AirControl = 0.35f;
 	GetCharacterMovement()->MaxWalkSpeed = 500.f;
@@ -41,14 +37,12 @@ AGACharacter::AGACharacter()
 
 void AGACharacter::BeginPlay()
 {
-	// Call the base class  
 	Super::BeginPlay();
 
 }
 
 void AGACharacter::Tick(float DeltaSeconds)
 {
-	// Do nothing
 
 	Super::Tick(DeltaSeconds);
 }
