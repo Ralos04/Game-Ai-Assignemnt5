@@ -10,338 +10,209 @@
 UE_DISABLE_OPTIMIZATION
 
 UGASpatialComponent::UGASpatialComponent(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
+    : Super(ObjectInitializer)
 {
-	SampleDimensions = 8000.0f;		// should cover the bulk of the test map
+    // Initialize the sampling range for evaluating the spatial function
+    SampleDimensions = 8000.0f;
 }
 
-
+// Retrieves and caches the grid actor instance in the world
 const AGAGridActor* UGASpatialComponent::GetGridActor() const
 {
-	AGAGridActor* Result = GridActor.Get();
-	if (Result)
-	{
-		return Result;
-	}
-	else
-	{
-		AActor* GenericResult = UGameplayStatics::GetActorOfClass(this, AGAGridActor::StaticClass());
-		if (GenericResult)
-		{
-			Result = Cast<AGAGridActor>(GenericResult);
-			if (Result)
-			{
-				// Cache the result
-				// Note, GridActor is marked as mutable in the header, which is why this is allowed in a const method
-				GridActor = Result;
-			}
-		}
-
-		return Result;
-	}
+    AGAGridActor* Result = GridActor.Get();
+    if (Result)
+    {
+        return Result;
+    }
+    // Locate and cache the grid actor
+    AActor* GenericResult = UGameplayStatics::GetActorOfClass(this, AGAGridActor::StaticClass());
+    Result = Cast<AGAGridActor>(GenericResult);
+    if (Result)
+    {
+        GridActor = Result;
+    }
+    return Result;
 }
 
+// Retrieves and caches the path component attached to the same owner
 UGAPathComponent* UGASpatialComponent::GetPathComponent() const
 {
-	UGAPathComponent* Result = PathComponent.Get();
-	if (Result)
-	{
-		return Result;
-	}
-	else
-	{
-		AActor* Owner = GetOwner();
-		if (Owner)
-		{
-			// Note, the UGAPathComponent and the UGASpatialComponent are both on the controller
-			Result = Owner->GetComponentByClass<UGAPathComponent>();
-			if (Result)
-			{
-				PathComponent = Result;
-			}
-		}
-		return Result;
-	}
+    UGAPathComponent* Result = PathComponent.Get();
+    if (Result)
+    {
+        return Result;
+    }
+    AActor* Owner = GetOwner();
+    if (Owner)
+    {
+        Result = Owner->GetComponentByClass<UGAPathComponent>();
+        if (Result)
+        {
+            PathComponent = Result;
+        }
+    }
+    return Result;
 }
 
+// Returns the pawn controlled by this component's owner (controller or pawn)
 APawn* UGASpatialComponent::GetOwnerPawn() const
 {
-	AActor* Owner = GetOwner();
-	if (Owner)
-	{
-		APawn* Pawn = Cast<APawn>(Owner);
-		if (Pawn)
-		{
-			return Pawn;
-		}
-		else
-		{
-			AController* Controller = Cast<AController>(Owner);
-			if (Controller)
-			{
-				return Controller->GetPawn();
-			}
-		}
-	}
-
-	return NULL;
+    AActor* Owner = GetOwner();
+    if (!Owner) return nullptr;
+    if (APawn* Pawn = Cast<APawn>(Owner)) return Pawn;
+    if (AController* Controller = Cast<AController>(Owner)) return Controller->GetPawn();
+    return nullptr;
 }
 
-
+/**
+ * Chooses a target position based on the spatial function.
+ * @param PathfindToPosition  If true, will build a path to the chosen position.
+ * @param Debug              (unused) originally used for debug rendering.
+ * @returns true if a valid position was found.
+ */
 bool UGASpatialComponent::ChoosePosition(bool PathfindToPosition, bool Debug)
 {
-	bool Result = false;
-	const APawn* OwnerPawn = GetOwnerPawn();
-	const AGAGridActor* Grid = GetGridActor();
-	UGAPathComponent* PathComponentPtr = GetPathComponent();
+    bool Result = false;
+    const APawn* OwnerPawn = GetOwnerPawn();
+    const AGAGridActor* Grid = GetGridActor();
+    UGAPathComponent* PathComp = GetPathComponent();
 
-	FCellRef LastCell = BestCell;
-	BestCell = FCellRef::Invalid;
+    // Validate prerequisites
+    if (!OwnerPawn || !Grid || !PathComp || !SpatialFunctionReference.Get())
+    {
+        if (!SpatialFunctionReference.Get())
+            UE_LOG(LogTemp, Warning, TEXT("UGASpatialComponent has no SpatialFunctionReference assigned."));
+        return false;
+    }
 
-	if (!OwnerPawn) { return false; }
+    // Default object for spatial function
+    const UGASpatialFunction* SpatialFunc = SpatialFunctionReference->GetDefaultObject<UGASpatialFunction>();
 
-	if (Grid == NULL)
-	{
-		return false;
-	}
+    // Determine sampling bounds around pawn
+    FVector PawnLoc3D = OwnerPawn->GetActorLocation();
+    FVector2D PawnLoc2D(PawnLoc3D);
+    FBox2D Box(EForceInit::ForceInit);
+    Box += PawnLoc2D;
+    Box = Box.ExpandBy(SampleDimensions * 0.5f);
 
-	if (PathComponentPtr == NULL)
-	{
-		return false;
-	}
+    FIntRect CellRect;
+    if (!Grid->GridSpaceBoundsToRect2D(Box, CellRect))
+        return false;
 
-	if (SpatialFunctionReference.Get() == NULL)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("UGASpatialComponent has no SpatialFunctionReference assigned."));
-		return false;
-	}
+    FGridBox GridBox(CellRect);
+    FGAGridMap GridMap(Grid, GridBox, 0.0f);
+    FGAGridMap DistanceMap(Grid, GridBox, FLT_MAX);
 
-	// Don't worry too much about the Unreal-ism below. Technically our SpatialFunctionReference is not ACTUALLY
-	// a spatial function instance, rather it's a class, which happens to have a lot of data in it.
-	// Happily, Unreal creates, under the hood, a default object for every class, that lets you access that data
-	// as if it were a normal instance
-	const UGASpatialFunction* SpatialFunction = SpatialFunctionReference->GetDefaultObject<UGASpatialFunction>();
+    // Step 1: gather reachable cells via Dijkstra
+    PathComp->Dijkstra(PawnLoc3D, DistanceMap);
+    GridMap.SetValue(BestCell, SpatialFunc->LastCellBonus);
 
-	// The below is to create a GridMap (which you will fill in) based on a bounding box centered around the OwnerPawn
+    // Step 2: evaluate each spatial function layer
+    for (const FFunctionLayer& Layer : SpatialFunc->Layers)
+    {
+        EvaluateLayer(Layer, DistanceMap, GridMap);
+    }
 
-	FBox2D Box(EForceInit::ForceInit);
-	FIntRect CellRect;
-	FVector StartLocation = OwnerPawn->GetActorLocation();
-	FVector2D PawnLocation(StartLocation);
-	Box += PawnLocation;
-	Box = Box.ExpandBy(SampleDimensions / 2.0f);
-	if (GridActor->GridSpaceBoundsToRect2D(Box, CellRect))
-	{
-		// Super annoying, by the way, that FIntRect is not blueprint accessible, because it forces us instead
-		// to make a separate bp-accessible FStruct that represents _exactly the same thing_.
-		FGridBox GridBox(CellRect);
+    // Step 3: select best-scoring cell
+    float BestScore = -FLT_MAX;
+    FCellRef Chosen = FCellRef::Invalid;
+    for (int32 Y = GridBox.MinY; Y <= GridBox.MaxY; ++Y)
+    {
+        for (int32 X = GridBox.MinX; X <= GridBox.MaxX; ++X)
+        {
+            FCellRef Cell(X, Y);
+            float Dist;
+            if (DistanceMap.GetValue(Cell, Dist) && Dist < FLT_MAX)
+            {
+                float Score;
+                GridMap.GetValue(Cell, Score);
+                if (Score > BestScore)
+                {
+                    BestScore = Score;
+                    Chosen = Cell;
+                }
+            }
+        }
+    }
+    BestCell = Chosen;
+    Result = BestCell.IsValid();
 
-		// This is the grid map I'm going to fill with values
-		FGAGridMap GridMap(Grid, GridBox, 0.0f);
-
-		// Fill in this distance map using Dijkstra!
-		FGAGridMap DistanceMap(Grid, GridBox, FLT_MAX);
-
-
-		// ~~~ STEPS TO FILL IN FOR ASSIGNMENT 3 ~~~
-
-
-		// Step 1: Run Dijkstra's to determine which cells we should even be evaluating (the GATHER phase)
-		// (You should add a Dijkstra() function to the UGAPathComponent())
-		// I would recommend adding a method to the path component which looks something like
-		PathComponentPtr->Dijkstra(StartLocation, DistanceMap);
-
-		// Give the last best cell a bonus
-		GridMap.SetValue(LastCell, SpatialFunction->LastCellBonus);
-
-		// Step 2: For each layer in the spatial function, evaluate and accumulate the layer in GridMap
-		// Note, only evaluate accessible cells found in step 1
-		for (const FFunctionLayer& Layer : SpatialFunction->Layers)
-		{
-			// figure out how to evaluate each layer type, and accumulate the value in the GridMap
-			EvaluateLayer(Layer, DistanceMap, GridMap);
-		}
-
-		// Step 3: pick the best cell in GridMap
-
-		{
-			float BestScore = -FLT_MAX;
-
-			for (int32 Y = GridMap.GridBounds.MinY; Y <= GridMap.GridBounds.MaxY; Y++)
-			{
-				for (int32 X = GridMap.GridBounds.MinX; X <= GridMap.GridBounds.MaxX; X++)
-				{
-					FCellRef CellRef(X, Y);
-					float D;
-
-					DistanceMap.GetValue(CellRef, D);
-
-					if (D < FLT_MAX)
-					{
-						float V;
-
-						GridMap.GetValue(CellRef, V);
-
-						if (V > BestScore)
-						{
-							BestScore = V;
-							BestCell = CellRef;
-							Result = true;
-						}
-					}
-				}
-			}
-		}
-
-		if (PathfindToPosition)
-		{
-			if (BestCell.IsValid())
-			{
-				// Step 4: Go there!
-				// This will involve reconstructing the path and then getting it into the UGAPathComponent
-				// Depending on what your cached Dijkstra data looks like, the path reconstruction might be implemented here
-				// or in the UGAPathComponent
-
-				PathComponentPtr->BuildPathFromDistanceMap(StartLocation, BestCell, DistanceMap);
-			}
-			else
-			{
-				PathComponentPtr->ClearPath();
-			}
-		}
-
-		
-		if (Debug)
-		{
-			// Note: this outputs (basically) the results of the position selection
-			// However, you can get creative with the debugging here. For example, maybe you want
-			// to be able to examine the values of a specific layer in the spatial function
-			// You could create a separate debug map above (where you're doing the evaluations) and
-			// cache it off for debug rendering. Ideally you'd be able to control what layer you wanted to 
-			// see from blueprint
-			
-			GridActor->DebugGridMap = GridMap;
-			GridActor->RefreshDebugTexture();
-			GridActor->DebugMeshComponent->SetVisibility(true);		//cheeky!
-		}
-	}
-
-	return Result;
+    // Step 4: optionally pathfind to chosen cell
+    if (PathfindToPosition)
+    {
+        if (BestCell.IsValid())
+            PathComp->BuildPathFromDistanceMap(PawnLoc3D, BestCell, DistanceMap);
+        else
+            PathComp->ClearPath();
+    }
+    return Result;
 }
 
-
-void UGASpatialComponent::EvaluateLayer(const FFunctionLayer& Layer, const FGAGridMap &DistanceMap, FGAGridMap &GridMap) const
+/**
+ * Evaluates a single layer of the spatial function for each traversable cell.
+ */
+void UGASpatialComponent::EvaluateLayer(
+    const FFunctionLayer& Layer,
+    const FGAGridMap& DistanceMap,
+    FGAGridMap& GridMap
+) const
 {
-	UWorld* World = GetWorld();
-	AActor* OwnerPawn = GetOwnerPawn();
-	const AGAGridActor* Grid = GetGridActor();
-	APawn *PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
-	//FVector TargetPosition = PlayerPawn->GetActorLocation();
-	FVector Offset(0.0f, 0.0f, 60.0f);
+    // Get world, grid, and target info
+    UWorld* World = GetWorld();
+    const AGAGridActor* Grid = GetGridActor();
+    APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
+    FTargetCache TC;
+    FTargetData TD;
+    if (!GetOwner()->GetComponentByClass<UGAPerceptionComponent>()
+        ->GetCurrentTargetState(TC, TD))
+        return;
+    FVector TargetPos = TC.Position;
+    FVector Offset(0, 0, 60);
 
-	FTargetCache targetCache;
-	FTargetData targetData;
+    // Loop through each cell in the sampling box
+    for (int32 Y = GridMap.GridBounds.MinY; Y <= GridMap.GridBounds.MaxY; ++Y)
+        for (int32 X = GridMap.GridBounds.MinX; X <= GridMap.GridBounds.MaxX; ++X)
+        {
+            FCellRef C(X, Y);
+            ECellData CD = Grid->GetCellData(C);
+            if (!EnumHasAllFlags(CD, ECellData::CellDataTraversable)) continue;
 
-	if (!GetOwner()->GetComponentByClass<UGAPerceptionComponent>()->GetCurrentTargetState(targetCache, targetData)) {
-		//Worry about it later 
-		//GridMap.SetValue(CellRef, ResultValue)
-		return;
-	}
-	FVector TargetPosition = targetCache.Position;
+            float Dist;
+            if (!DistanceMap.GetValue(C, Dist) || Dist >= FLT_MAX) continue;
 
-	//UGAPerceptionSystem* PerceptionSystem = UGAPerceptionSystem::GetPerceptionSystem(this);
+            // Compute raw layer input
+            float Raw = 0;
+            FVector CellWorld = Grid->GetCellPosition(C);
+            switch (Layer.Input)
+            {
+            case SI_None: break;
+            case SI_TargetRange: Raw = FVector::Dist(CellWorld, TargetPos); break;
+            case SI_PathDistance: Raw = Dist; break;
+            case SI_LOS:
+            {
+                FVector Start = CellWorld + Offset;
+                FHitResult Hit;
+                FCollisionQueryParams P;
+                P.AddIgnoredActor(PlayerPawn);
+                P.AddIgnoredActor(GetOwnerPawn());
+                bool bHit = World->LineTraceSingleByChannel(Hit, Start, TargetPos, ECollisionChannel::ECC_Visibility, P);
+                Raw = bHit ? 0.f : 1.f;
+                break;
+            }
+            }
 
-	for (int32 Y = GridMap.GridBounds.MinY; Y <= GridMap.GridBounds.MaxY; Y++)
-	{
-		for (int32 X = GridMap.GridBounds.MinX; X <= GridMap.GridBounds.MaxX; X++)
-		{
-			FCellRef CellRef(X, Y);
-
-			if (EnumHasAllFlags(Grid->GetCellData(CellRef), ECellData::CellDataTraversable))
-			{
-				float CellDistance;
-				if (DistanceMap.GetValue(CellRef, CellDistance) &&
-					(CellDistance < FLT_MAX))
-				{
-					// evaluate me!
-
-					float Value = 0.0f;
-
-					switch (Layer.Input)
-					{
-					case SI_None:
-						break;
-					case SI_TargetRange:
-					{
-						FVector CellPosition = Grid->GetCellPosition(CellRef);
-						Value = FVector::Distance(CellPosition, TargetPosition);
-					}
-					break;
-					case SI_PathDistance:
-						Value = CellDistance;
-						break;
-					case SI_LOS:
-					{
-						FVector CellPosition = Grid->GetCellPosition(CellRef) + Offset;
-						FHitResult HitResult;
-						FCollisionQueryParams Params;
-						FVector Start = CellPosition;
-						FVector End = TargetPosition;
-						Params.AddIgnoredActor(PlayerPawn);			// Probably want to ignore the player pawn
-						Params.AddIgnoredActor(OwnerPawn);			// Probably want to ignore the AI themself
-						bool bHitSomething = World->LineTraceSingleByChannel(HitResult, Start, End, ECollisionChannel::ECC_Visibility, Params);
-						Value = bHitSomething ? 0.0f : 1.0f;
-						break;
-					}
-					};
-
-
-					{
-						// Next, run it through the response curve using something like this
-						float ModifiedValue = Layer.ResponseCurve.GetRichCurveConst()->Eval(Value, Value);
-						float CurrentValue = 0.0f;
-						float ResultValue = 0.0f;
-
-						GridMap.GetValue(CellRef, CurrentValue);
-
-						switch (Layer.Op)
-						{
-						case SO_None:
-							ResultValue = CurrentValue;
-							break;
-						case SO_Add:
-							ResultValue = CurrentValue + ModifiedValue;
-							break;
-						case SO_Multiply:
-							ResultValue = CurrentValue * ModifiedValue;
-							break;
-						}
-
-						GridMap.SetValue(CellRef, ResultValue);
-					}
-
-
-					// HERE ARE SOME ADDITIONAL HINTS
-
-					// Here's how to get the player's pawn
-
-					// Here's how to cast a ray
-
-					// UWorld* World = GetWorld();
-					// FHitResult HitResult;
-					// FCollisionQueryParams Params;
-					// FVector Start = Grid->GetCellPosition(CellRef);		// need a ray start
-					// FVector End = PlayerPawn->GetActorLocation();		// need a ray end
-					// Start.Z = End.Z;		// Hack: we don't have Z information in the grid actor -- take the player's z value and raycast against that
-					// Add any actors that should be ignored by the raycast by calling
-					// Params.AddIgnoredActor(PlayerPawn);			// Probably want to ignore the player pawn
-					// Params.AddIgnoredActor(OwnerPawn);			// Probably want to ignore the AI themself
-					// bool bHitSomething = World->LineTraceSingleByChannel(HitResult, Start, End, ECollisionChannel::ECC_Visibility, Params);
-					// If bHitSomething is false, then we have a clear LOS
-				}
-			}
-		}
-	}
+            // Apply response curve and combine
+            float EvalVal = Layer.ResponseCurve.GetRichCurveConst()->Eval(Raw, Raw);
+            float Curr = 0, Out = 0;
+            GridMap.GetValue(C, Curr);
+            switch (Layer.Op)
+            {
+            case SO_None:     Out = Curr;                break;
+            case SO_Add:      Out = Curr + EvalVal;        break;
+            case SO_Multiply: Out = Curr * EvalVal;        break;
+            }
+            GridMap.SetValue(C, Out);
+        }
 }
 
 UE_ENABLE_OPTIMIZATION
